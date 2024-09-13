@@ -20,6 +20,7 @@ import { ILogService, LogLevel as LogServiceLevel } from '../../../platform/log/
 import { IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
 import { LogLevel, createHttpPatch, createProxyResolver, createTlsPatch, ProxySupportSetting, ProxyAgentParams, createNetPatch, loadSystemCertificates } from '@vscode/proxy-agent';
 import { AuthInfo } from '../../../platform/request/common/request.js';
+import { DisposableStore } from '../../../base/common/lifecycle.js';
 
 // ESM-uncomment-begin
 import { createRequire } from 'node:module';
@@ -31,6 +32,7 @@ const net = require('net');
 // ESM-uncomment-end
 
 const systemCertificatesV2Default = false;
+const useElectronFetchDefault = true;
 
 export function connectProxyResolver(
 	extHostWorkspace: IExtHostWorkspaceProvider,
@@ -39,7 +41,11 @@ export function connectProxyResolver(
 	extHostLogService: ILogService,
 	mainThreadTelemetry: MainThreadTelemetryShape,
 	initData: IExtensionHostInitData,
+	disposables: DisposableStore,
 ) {
+
+	patchGlobalFetch(configProvider, initData, disposables);
+
 	const useHostProxy = initData.environment.useHostProxy;
 	const doUseHostProxy = typeof useHostProxy === 'boolean' ? useHostProxy : !initData.remote.isRemote;
 	const params: ProxyAgentParams = {
@@ -92,6 +98,28 @@ export function connectProxyResolver(
 	const resolveProxy = createProxyResolver(params);
 	const lookup = createPatchedModules(params, resolveProxy);
 	return configureModuleLoading(extensionService, lookup);
+}
+
+function patchGlobalFetch(configProvider: ExtHostConfigProvider, initData: IExtensionHostInitData, disposables: DisposableStore) {
+	if (!initData.remote.isRemote && !(globalThis as any).__originalFetch) {
+		const originalFetch = globalThis.fetch;
+		(globalThis as any).__originalFetch = originalFetch;
+		let useElectronFetch = configProvider.getConfiguration('http').get<boolean>('experimental.electronFetch', useElectronFetchDefault);
+		disposables.add(configProvider.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('http.experimental.electronFetch')) {
+				useElectronFetch = configProvider.getConfiguration('http').get<boolean>('experimental.electronFetch', useElectronFetchDefault);
+			}
+		}));
+		const electron = require('electron');
+		globalThis.fetch = function fetch(input: any /* RequestInfo */ | URL, init?: RequestInit) {
+			if (!useElectronFetch) {
+				return originalFetch(input, init);
+			}
+			// Support for URL: https://github.com/electron/electron/issues/43712
+			const electronInput = input instanceof URL ? input.toString() : input;
+			return electron.net.fetch(electronInput, init);
+		};
+	}
 }
 
 function createPatchedModules(params: ProxyAgentParams, resolveProxy: ReturnType<typeof createProxyResolver>) {
